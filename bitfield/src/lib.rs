@@ -11,5 +11,29 @@
 // From the perspective of a user of this crate, they get all the necessary APIs
 // (macro, trait, struct) through the one bitfield crate.
 pub use bitfield_impl::bitfield;
+pub use bitfield_impl::specifier;
+
+pub mod access;
+pub use access::*;
 
 // TODO other things
+
+pub trait Specifier {
+    const BITS: usize;
+    type T;
+}
+
+// Define bits specifier.
+// This function like macro will generate a sort of specifer struct for 1 to n.
+// Concretely, call specifier!(64) will expand codes below:
+// pub enum B1 {}
+// impl Specifier for B1 { const BITS: u8 = 1; }
+//     .    .    .
+//     .    .    .
+//     .    .    .
+// pub enum B64 {}
+// impl Specifier for B64 { const BITS: u8 = 64; }
+specifier!(64);
+
+
+
