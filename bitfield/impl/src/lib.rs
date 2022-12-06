@@ -5,6 +5,7 @@ use quote::format_ident;
 use syn::parse::Parse;
 use syn::parse_macro_input;
 use syn::Item;
+use syn::DeriveInput;
 use quote::quote;
 
 #[proc_macro_attribute]
@@ -29,12 +30,13 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
         for field in  s.fields.iter() {
             let ident = field.ident.as_ref().unwrap();  // named field only
             let ty = &field.ty;
-            let item_ty = quote! { <#ty as ::bitfield::Specifier>::T };
+            let item_ty = quote! { <#ty as ::bitfield::Specifier>::V };
+            let inner_ty = quote! { <#ty as ::bitfield::Specifier>::T };
             let bits = quote! { <#ty as ::bitfield::Specifier>::BITS };
             let sz = quote! { + #bits };
             // let sz = quote! { + <#ty as bitfield::Specifier>::BITS };
             println!("sz: {}", sz);
-            field_attrs.push((ident, item_ty, bits, size.clone()));
+            field_attrs.push((ident, item_ty, inner_ty, bits, size.clone()));
             size.extend(sz);
         }
 
@@ -55,8 +57,20 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
                         data: [0; #size_token],
                     } 
                 }
-            }
+            }            
         });
+
+        /* For test-04
+         * Because the proc macro expand before actual parse and aliasing,
+         * it's impossiable the calculate the size during macro expansion.
+         * Here I can't find any other ways to to the checking.
+         * This code will satisfied the functionality of test-04, but the compile error 
+         * generated do not match the error file given by the origin author.
+         */
+        output.extend(quote! {
+            ::bitfield::static_assertions::const_assert_eq!((#size) % 8, 0);
+        });
+
         // let newfn = quote! {
         //     impl #ident {
         //         #vis fn new() -> Self {
@@ -69,17 +83,17 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
         // Get & Set methods.
         let total = quote! { (#size) };
         let mut getset = proc_macro2::TokenStream::new();
-        for (ident, ty, bits, offset) in &field_attrs {
+        for (ident, item_ty, inner_ty, bits, offset) in &field_attrs {
             // println!("ident: {}, ty: {}, bits: {}, offset: {}", ident, ty, bits, offset);
             let set_ident = format_ident!("set_{}", ident.to_string());
             let get_ident = format_ident!("get_{}", ident.to_string());
             let temp = quote! {
-                pub fn #set_ident(&mut self, x: #ty) {
+                pub fn #set_ident(&mut self, x: #item_ty) {
                     // <#ty as ::bitfield::Access<#bits, 0, 8>>::SET(&mut self.data, x);
-                    <#ty as ::bitfield::Access<{#bits}, {#offset}, {#total}>>::SET(&mut self.data, x);
+                    <#inner_ty as ::bitfield::Access<{#bits}, {#offset}, {#total}>>::SET(&mut self.data, x.binto());
                 }
-                pub fn #get_ident(&self) -> #ty {
-                    <#ty as ::bitfield::Access<{#bits}, {#offset}, {#total}>>::GET(&self.data)
+                pub fn #get_ident(&self) -> #item_ty {
+                    <#inner_ty as ::bitfield::Access<{#bits}, {#offset}, {#total}>>::GET(&self.data).binto()
                 }
             };
             // println!("temp: {}", temp);
@@ -135,6 +149,7 @@ fn bits_define(n: usize) -> proc_macro2::TokenStream {
         impl Specifier for #ident {
             const BITS: usize = #bits;
             type T = #ty;
+            type V = #ty;
         }
     }
 }
@@ -151,4 +166,91 @@ fn bits_type(n: usize) -> proc_macro2::TokenStream {
     } else {
         panic!("Not support bits > 64.")
     }
+}
+
+
+/* Derive macro for building enum specifier */
+#[proc_macro_derive(BitfieldSpecifier)]
+pub fn derive_specifier(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let mut output = proc_macro2::TokenStream::new();
+    if let syn::Data::Enum(de) = &ast.data {
+        let ident = &ast.ident;
+        let num_arms = de.variants.iter().len();
+        let bits = match perfect_log2(num_arms) {
+            Ok(v) => v,
+            // For test-08.
+            Err(_) => {
+                const MSG: &'static str = "BitfieldSpecifier expected a number of variants which is a power of 2";
+                let err = syn::Error::new(Span::call_site(), MSG);
+                return err.to_compile_error().into();
+            },
+        };
+        let bits = syn::LitInt::new(&bits.to_string(), Span::call_site());
+        let ty = bits_type(num_arms);
+
+        output.extend(quote! {
+            impl ::bitfield::Specifier for #ident {
+                const BITS: usize = #bits;
+                type T = #ty;
+                type V = #ident;
+            }
+        });
+
+        // Token stream of arms of convert Specifier::T to Specifier::V.
+        let mut to_t = vec![];
+        // Token stream of arms of convert Specifier::V to Specifier::T.
+        let mut to_v = vec![];
+        // Token stream of arms of discriminant values.
+        let mut disc = vec![];
+        for var in de.variants.iter() {
+            println!("var: {}", var.to_token_stream());
+            let v_ident = &var.ident;
+            to_t.push(quote!{ #ident::#v_ident => #ident::#v_ident as #ty, });
+            to_v.push(quote!{ #v_ident => #ident::#v_ident, });
+            disc.push(quote!{ const #v_ident: #ty = #ident::#v_ident as #ty; });
+        }
+
+        let to_t_iter = to_t.iter();
+        let to_v_iter = to_v.iter();
+        let disc_iter = disc.iter();
+        // The first arm of target enum.
+        // This unwrap will be safe because the perfect_log2 reject the empty enum case.
+        let default_disc = &de.variants.first().unwrap().ident;
+        let default = quote!( _ => #ident::#default_disc, );
+        output.extend(quote!{
+            impl ::bitfield::BInto<#ty> for #ident {
+                fn binto(self) -> #ty {
+                    match self {
+                        #( #to_t_iter )*
+                    }
+                }
+            }
+
+            impl ::bitfield::BInto<#ident> for #ty {
+                fn binto(self) -> #ident {
+                    #![allow(non_upper_case_globals)]
+                    #( #disc_iter )*
+                    match self {
+                        #( #to_v_iter )*
+                        #default
+                    }
+                }
+            }
+        });
+    }
+
+    println!("derive output: {}", output);
+    
+    output.into()
+}
+
+// Function to calculate log2 for integer.
+// If input value is 2^P result log2(P), otherwise return error.
+const USIZE_BITS: u32 = (std::mem::size_of::<usize>() * 8) as u32;
+fn perfect_log2(x: usize) -> Result<u32, ()> {
+    if x.count_ones() != 1 {
+        return Err(());
+    }
+    Ok(USIZE_BITS - x.leading_zeros() -1)
 }
