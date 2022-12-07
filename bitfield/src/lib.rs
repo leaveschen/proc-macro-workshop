@@ -20,6 +20,7 @@ pub use bitfield_impl::BitfieldSpecifier;
 
 pub mod access;
 pub use access::*;
+pub mod check;
 
 // TODO other things
 

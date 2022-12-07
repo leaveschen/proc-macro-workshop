@@ -6,7 +6,7 @@ use syn::parse::Parse;
 use syn::parse_macro_input;
 use syn::Item;
 use syn::DeriveInput;
-use quote::quote;
+use quote::{quote, quote_spanned};
 
 #[proc_macro_attribute]
 pub fn bitfield(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -25,11 +25,24 @@ pub fn bitfield(args: TokenStream, input: TokenStream) -> TokenStream {
 fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
     if let syn::Item::Struct(s) = item {
         println!("is struct");
+        let mut output = proc_macro2::TokenStream::new();
         let mut size = quote!(0);
         let mut field_attrs = vec![];
         for field in  s.fields.iter() {
             let ident = field.ident.as_ref().unwrap();  // named field only
             let ty = &field.ty;
+            // For test 10 & 11.
+            if let Some(bits) = parse_attr(&field.attrs) {
+                let struct_ident = &s.ident;
+                let scope = format_ident!("__attr_{}_{}", struct_ident.to_string(), ident.to_string());
+                output.extend(quote_spanned!{ bits.span() =>
+                    const fn #scope() {
+                        struct Inner { x: [u8; #bits] }
+                        const _: Inner = Inner { x: [0; <#ty as ::bitfield::Specifier>::BITS] };
+                    }
+                });
+            }
+
             let item_ty = quote! { <#ty as ::bitfield::Specifier>::V };
             let inner_ty = quote! { <#ty as ::bitfield::Specifier>::T };
             let bits = quote! { <#ty as ::bitfield::Specifier>::BITS };
@@ -45,7 +58,6 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
         println!("size_token: {}", size_token);
         let ident = &s.ident;
         let vis = &s.vis;
-        let mut output = proc_macro2::TokenStream::new();
         output.extend(quote! {
             #vis struct #ident {
                 data: [u8; #size_token],
@@ -55,9 +67,9 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
                 #vis fn new() -> Self {
                     #ident {
                         data: [0; #size_token],
-                    } 
+                    }
                 }
-            }            
+            }
         });
 
         /* For test-04
@@ -112,6 +124,22 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
     }
     Err(())
 }
+
+// For test 10 & 11.
+fn parse_attr(attrs: &Vec<syn::Attribute>) -> Option<syn::Lit> {
+    if let [attr] = attrs.as_slice() {
+        println!("[--attr] {}", attr.tokens);
+        if let Ok(syn::Meta::NameValue(nv)) = attr.parse_meta() {
+            if nv.path.is_ident("bits") {
+                println!("[--attr] is named value, with name=bits");
+                println!("[--attr] value={}", nv.lit.to_token_stream());
+                return Some(nv.lit.clone());
+            }
+        }
+    }
+    None
+}
+
 
 #[proc_macro]
 pub fn specifier(input: TokenStream) -> TokenStream {
@@ -203,12 +231,25 @@ pub fn derive_specifier(input: TokenStream) -> TokenStream {
         let mut to_v = vec![];
         // Token stream of arms of discriminant values.
         let mut disc = vec![];
+
+        // For test-09
+        let mut check_range = vec![];
+        let arms = syn::LitInt::new(&num_arms.to_string(), Span::call_site());
+
         for var in de.variants.iter() {
             println!("var: {}", var.to_token_stream());
             let v_ident = &var.ident;
+
             to_t.push(quote!{ #ident::#v_ident => #ident::#v_ident as #ty, });
             to_v.push(quote!{ #v_ident => #ident::#v_ident, });
             disc.push(quote!{ const #v_ident: #ty = #ident::#v_ident as #ty; });
+
+            let check_range_const = quote_spanned!{ v_ident.span() =>
+                #[allow(non_upper_case_globals)]
+                const #v_ident: usize = #ident::#v_ident as usize;
+                impl ::bitfield::check::CheckRangeTrait<<::bitfield::check::CheckRange::<#v_ident, {#arms > #v_ident}> as ::bitfield::check::Tag>::T> for Empty::<#v_ident> {}
+            };
+            check_range.push(check_range_const);
         }
 
         let to_t_iter = to_t.iter();
@@ -218,6 +259,9 @@ pub fn derive_specifier(input: TokenStream) -> TokenStream {
         // This unwrap will be safe because the perfect_log2 reject the empty enum case.
         let default_disc = &de.variants.first().unwrap().ident;
         let default = quote!( _ => #ident::#default_disc, );
+        // For test-09.
+        let check_range_iter = check_range.iter();
+        let check_ident = format_ident!("__check_{}", ident.to_string());
         output.extend(quote!{
             impl ::bitfield::BInto<#ty> for #ident {
                 fn binto(self) -> #ty {
@@ -236,6 +280,12 @@ pub fn derive_specifier(input: TokenStream) -> TokenStream {
                         #default
                     }
                 }
+            }
+
+            #[allow(non_snake_case)]
+            const fn #check_ident() {
+                struct Empty<const U: usize>;
+                #( #check_range_iter )*
             }
         });
     }
