@@ -11,9 +11,6 @@
 // From the perspective of a user of this crate, they get all the necessary APIs
 // (macro, trait, struct) through the one bitfield crate.
 
-// Re-export because it will be used in the attribute macro.
-pub use static_assertions;
-
 pub use bitfield_impl::bitfield;
 pub use bitfield_impl::specifier;
 pub use bitfield_impl::BitfieldSpecifier;

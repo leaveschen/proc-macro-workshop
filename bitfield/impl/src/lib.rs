@@ -11,20 +11,14 @@ use quote::{quote, quote_spanned};
 #[proc_macro_attribute]
 pub fn bitfield(args: TokenStream, input: TokenStream) -> TokenStream {
     let _ = args;
-    // let _ = input;
     let item = parse_macro_input!(input as Item);
-    // let ts = item.to_token_stream();
     let r = impl_bitfield(&item).unwrap();
-    // println!("ts: {}", ts);
-    // println!("r: {}", r);
-
-    // unimplemented!()
     r.into()
 }
 
 fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
     if let syn::Item::Struct(s) = item {
-        println!("is struct");
+        // println!("is struct");
         let mut output = proc_macro2::TokenStream::new();
         let mut size = quote!(0);
         let mut field_attrs = vec![];
@@ -34,7 +28,8 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
             // For test 10 & 11.
             if let Some(bits) = parse_attr(&field.attrs) {
                 let struct_ident = &s.ident;
-                let scope = format_ident!("__attr_{}_{}", struct_ident.to_string(), ident.to_string());
+                let scope = format_ident!("__attr_{}_{}",
+                    struct_ident.to_string().to_lowercase(), ident.to_string().to_lowercase());
                 output.extend(quote_spanned!{ bits.span() =>
                     const fn #scope() {
                         struct Inner { x: [u8; #bits] }
@@ -47,15 +42,15 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
             let inner_ty = quote! { <#ty as ::bitfield::Specifier>::T };
             let bits = quote! { <#ty as ::bitfield::Specifier>::BITS };
             let sz = quote! { + #bits };
-            // let sz = quote! { + <#ty as bitfield::Specifier>::BITS };
-            println!("sz: {}", sz);
+
+            // println!("sz: {}", sz);
             field_attrs.push((ident, item_ty, inner_ty, bits, size.clone()));
             size.extend(sz);
         }
 
         // Rewrite layout.
         let size_token = quote! { (#size) / 8 };
-        println!("size_token: {}", size_token);
+        // println!("size_token: {}", size_token);
         let ident = &s.ident;
         let vis = &s.vis;
         output.extend(quote! {
@@ -75,40 +70,36 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
         /* For test-04
          * Because the proc macro expand before actual parse and aliasing,
          * it's impossiable the calculate the size during macro expansion.
-         * Here I can't find any other ways to to the checking.
-         * This code will satisfied the functionality of test-04, but the compile error 
+         * Our code will satisfied the functionality of test-04, but the compile error 
          * generated do not match the error file given by the origin author.
          */
+        let scope = format_ident!("__bitsmod_{}", ident.to_string().to_lowercase());
         output.extend(quote! {
-            ::bitfield::static_assertions::const_assert_eq!((#size) % 8, 0);
+            // Alternative use the methods in `static_assertions` crate makes the code clear:
+            // `::static_assertions::const_assert_eq!((#size) % 8, 0);`
+            // But the failed error info will be diffcult reading.
+            const fn #scope() {
+                const __BITS_MOD_8: usize = (#size) % 8;
+                use ::bitfield::check::{TotalSizeIsMultipleOfEightBits, CheckMod, Tag, CheckModTrait};
+                struct Empty;
+                impl CheckModTrait<<CheckMod<__BITS_MOD_8> as Tag>::T> for Empty {}
+            }
         });
-
-        // let newfn = quote! {
-        //     impl #ident {
-        //         #vis fn new() -> Self {
-        //             data: [0; {#size_token}],
-        //         }
-        //     }
-        // };
-        // println!("newfn: {}", newfn);
 
         // Get & Set methods.
         let total = quote! { (#size) };
         let mut getset = proc_macro2::TokenStream::new();
         for (ident, item_ty, inner_ty, bits, offset) in &field_attrs {
-            // println!("ident: {}, ty: {}, bits: {}, offset: {}", ident, ty, bits, offset);
             let set_ident = format_ident!("set_{}", ident.to_string());
             let get_ident = format_ident!("get_{}", ident.to_string());
             let temp = quote! {
                 pub fn #set_ident(&mut self, x: #item_ty) {
-                    // <#ty as ::bitfield::Access<#bits, 0, 8>>::SET(&mut self.data, x);
                     <#inner_ty as ::bitfield::Access<{#bits}, {#offset}, {#total}>>::SET(&mut self.data, x.binto());
                 }
                 pub fn #get_ident(&self) -> #item_ty {
                     <#inner_ty as ::bitfield::Access<{#bits}, {#offset}, {#total}>>::GET(&self.data).binto()
                 }
             };
-            // println!("temp: {}", temp);
             getset.extend(temp);
         }
 
@@ -118,8 +109,7 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
             }
         });
 
-        println!(">>> output:\n{}", output);
-
+        // println!(">>> output:\n{}", output);
         return Ok(output);
     }
     Err(())
@@ -128,11 +118,8 @@ fn impl_bitfield(item: &Item) -> Result<proc_macro2::TokenStream, ()> {
 // For test 10 & 11.
 fn parse_attr(attrs: &Vec<syn::Attribute>) -> Option<syn::Lit> {
     if let [attr] = attrs.as_slice() {
-        println!("[--attr] {}", attr.tokens);
         if let Ok(syn::Meta::NameValue(nv)) = attr.parse_meta() {
             if nv.path.is_ident("bits") {
-                println!("[--attr] is named value, with name=bits");
-                println!("[--attr] value={}", nv.lit.to_token_stream());
                 return Some(nv.lit.clone());
             }
         }
@@ -144,13 +131,10 @@ fn parse_attr(attrs: &Vec<syn::Attribute>) -> Option<syn::Lit> {
 #[proc_macro]
 pub fn specifier(input: TokenStream) -> TokenStream {
     let si = parse_macro_input!(input as SpecifierInput);
-    println!("parsed input maxn={}", si.maxn);
     let mut output = proc_macro2::TokenStream::new();
     for n in 1..=si.maxn {
         output.extend(bits_define(n));
     }
-    // let expand = bits_define(1);
-    // expand.into()
     output.into()
 }
 
